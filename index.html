@@ -397,4 +397,131 @@ async function enter(){
 run($("bAuth"), async () => {
   const name = $("uName0").value.trim(), pass = $("uPass0").value;
   if (!/^[A-Za-z0-9_\u4e00-\u9fa5]{2,16}$/.test(name)) throw new Error("invalid username");
-  if (pass.length < 6) throw new
+  if (pass.length < 6) throw new Error("密码至少 6 位");
+const email = await fakeEmail(name);
+  if (mode === "up"){
+    const { error } = await timeout(db.auth.signUp({ email, password: pass }), 10000);
+    if (error) throw error;
+    await rpc("register_profile", { p_username: name });
+  } else {
+    const { error } = await timeout(db.auth.signInWithPassword({ email, password: pass }), 10000);
+    if (error) throw error;
+  }
+  await enter();
+});
+
+$("bOut").onclick = async () => { await db.auth.signOut(); location.reload(); };
+
+run($("bAdmin"), async () => {
+  const rows = await rpc("admin_reports");
+  const box = $("adminOut"); box.textContent = "";
+  if (!rows.length) box.append(el("p", "hint", "没有被举报的内容。"));
+  rows.forEach((r) => {
+    const c = el("div", "card");
+    const m = el("div", "meta");
+    m.append(el("span", "", (r.target_type === "post" ? "帖子" : "公开信") + " · " + r.cnt + " 人举报"), el("span", "", r.hidden ? "已隐藏" : "显示中"));
+    c.append(m, el("div", "body", r.content || "（已删除）"));
+    const row = el("div"); row.style.cssText = "display:flex;gap:6px;flex-wrap:wrap";
+    const mk = (t, fn) => {
+      const b = el("button", "chip ghost", t);
+      b.onclick = async () => { try { await fn(); toast("已完成"); } catch (e) { toast(msgOf(e)); } };
+      return b;
+    };
+    row.append(
+      mk(r.hidden ? "取消隐藏" : "隐藏", () => rpc("admin_set_hidden", { p_type: r.target_type, p_id: r.target_id, p_hidden: !r.hidden })),
+      mk("删除", () => rpc("admin_delete", { p_type: r.target_type, p_id: r.target_id }).then(() => c.remove())),
+      mk("封号", () => rpc("admin_ban", { p_user: r.author_id, p_with_ip: false })),
+      mk("封号+IP", () => rpc("admin_ban", { p_user: r.author_id, p_with_ip: true }))
+    );
+    c.append(row); box.append(c);
+  });
+});
+
+let curConv = null;
+function chatView(list){ $("chatList").hidden = !list; $("chatMsgs").hidden = list; $("chatBack").hidden = list; }
+async function openInbox(){
+  $("chat").hidden = false; $("chatTitle").textContent = "私信"; chatView(true);
+  const box = $("chatList"); box.textContent = "";
+  try {
+    const rows = await rpc("my_conversations");
+    if (!rows.length) box.append(el("p", "hint", "还没有私信。在主页帖子下点“私信”就能开始聊天。"));
+    rows.forEach((r) => {
+      const c = el("div", "card"); c.style.cursor = "pointer";
+      const m = el("div", "meta");
+      m.append(el("strong", "", r.peer), el("span", "", r.unread > 0 ? r.unread + " 条未读" : (r.last_at ? fmt(r.last_at) : "")));
+      c.append(m, el("div", "body", r.last_msg || "（还没有消息）"));
+      c.onclick = () => openChat(r.conv_id, r.peer);
+      box.append(c);
+    });
+  } catch (e) { toast(msgOf(e)); }
+}
+async function openChat(id, peer){
+  curConv = id; $("chat").hidden = false; $("chatTitle").textContent = peer; chatView(false);
+  await loadMsgs();
+}
+async function loadMsgs(){
+  try {
+    const rows = await rpc("get_messages", { p_conv: curConv });
+    const box = $("msgs"); box.textContent = "";
+    rows.forEach((r) => box.append(el("div", "bub" + (r.mine ? " me" : ""), r.content)));
+    box.scrollTop = box.scrollHeight;
+  } catch (e) { toast(msgOf(e)); }
+}
+$("dm").onclick = openInbox;
+$("chatBack").onclick = openInbox;
+$("chatClose").onclick = () => $("chat").hidden = true;
+run($("dmSend"), async () => {
+  await rpc("send_dm", { p_conv: curConv, p_content: $("dmText").value });
+  $("dmText").value = ""; await loadMsgs();
+});
+setInterval(() => { if (!$("chat").hidden && curConv && !$("chatMsgs").hidden) loadMsgs(); }, 5000);
+
+async function adminThread(id, title){
+  const box = $("adminOut"); box.textContent = "";
+  const back = el("button", "chip ghost", "返回列表"); back.onclick = () => $("bAdminChats").click();
+  box.append(back, el("p", "hint", title));
+  try {
+    const rows = await rpc("admin_messages", { p_conv: id });
+    rows.forEach((r) => {
+      const c = el("div", "card");
+      const m = el("div", "meta"); m.append(el("span", "", r.sender), el("span", "", fmt(r.created_at)));
+      c.append(m, el("div", "body", r.content));
+      const row = el("div"); row.style.cssText = "display:flex;gap:6px;flex-wrap:wrap";
+      [["禁言", false], ["禁言+封IP", true]].forEach(([t, ip]) => {
+        const b = el("button", "chip ghost", t);
+        b.onclick = async () => {
+          try { await rpc("admin_ban_chat", { p_user: r.sender_id, p_with_ip: ip }); toast("已处理"); } catch (e) { toast(msgOf(e)); }
+        };
+        row.append(b);
+      });
+      c.append(row); box.append(c);
+    });
+  } catch (e) { toast(msgOf(e)); }
+}
+run($("bAdminChats"), async () => {
+  const rows = await rpc("admin_conversations");
+  const box = $("adminOut"); box.textContent = "";
+  if (!rows.length) box.append(el("p", "hint", "还没有私信记录。"));
+  rows.forEach((r) => {
+    const c = el("div", "card"); c.style.cursor = "pointer";
+    const t = r.name_a + " ⇄ " + r.name_b;
+    const m = el("div", "meta"); m.append(el("strong", "", t), el("span", "", r.cnt + " 条 · " + fmt(r.last_at)));
+    c.append(m, el("div", "body", r.last_msg));
+    c.onclick = () => adminThread(r.conv_id, t);
+    box.append(c);
+  });
+});
+
+(async function boot(){
+  try {
+    const { data } = await timeout(db.auth.getSession(), 8000);
+    const s = data.session;
+    if (s && !s.user.is_anonymous) await enter();
+    else if (s) await db.auth.signOut();
+  } catch (e) { toast("启动失败：" + e.message); }
+})();
+}
+</script>
+<script>main();</script>
+</body>
+</html>
